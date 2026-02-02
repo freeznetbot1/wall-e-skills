@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""
+WeChat Mac Controller - GUI automation for WeChat on macOS
+
+Requirements:
+- pip3 install pyautogui opencv-python pytesseract pillow
+- brew install tesseract
+- brew install cliclick (for reliable keyboard input)
+- Grant Accessibility permissions to Terminal
+"""
+
+import argparse
+import os
+import sys
+import subprocess
+from pathlib import Path
+from datetime import datetime
+
+try:
+    import pyautogui
+    import cv2
+    import numpy as np
+    from PIL import Image
+    import pytesseract
+except ImportError as e:
+    print(f"Missing dependency: {e}")
+    print("Run: pip3 install pyautogui opencv-python pytesseract pillow")
+    sys.exit(1)
+
+
+class WeChatController:
+    """Control WeChat via GUI automation on macOS."""
+    
+    SCREENSHOT_DIR = Path("/tmp/wechat_mac_screenshots")
+    
+    def __init__(self):
+        self.wechat_bundle_id = "com.tencent.xinWeChat"
+        self._ensure_screenshot_dir()
+    
+    def _ensure_screenshot_dir(self):
+        """Create screenshot directory if needed."""
+        self.SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    
+    def _run_cliclick(self, *args):
+        """Run cliclick command."""
+        cmd = ['cliclick'] + list(args)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            return result.returncode == 0
+        except FileNotFoundError:
+            print("cliclick not found. Run: brew install cliclick")
+            return False
+    
+    def activate(self):
+        """Bring WeChat window to front using AppleScript."""
+        script = '''
+        tell application "System Events"
+            tell process "WeChat"
+                set frontmost to true
+            end tell
+        end tell
+        '''
+        try:
+            subprocess.run(['osascript', '-e', script], check=True)
+            print("✅ WeChat activated")
+        except subprocess.CalledProcessError:
+            print("❌ Could not activate WeChat. Check Accessibility permissions.")
+            return False
+        return True
+    
+    def screenshot(self, filename=None):
+        """Take a screenshot of the current screen."""
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"wechat_{timestamp}.png"
+        
+        filepath = self.SCREENSHOT_DIR / filename
+        
+        # Use macOS screencapture command with full path
+        try:
+            subprocess.run(['/usr/sbin/screencapture', '-x', '-t', 'png', str(filepath)], check=True)
+            print(f"📸 Screenshot saved: {filepath}")
+            return str(filepath)
+        except subprocess.CalledProcessError as e:
+            print(f"Screenshot failed: {e}")
+            return None
+    
+    def ocr(self, image_path=None):
+        """Extract text from screenshot using Tesseract OCR."""
+        if image_path is None:
+            image_path = self.screenshot()
+        
+        try:
+            img = Image.open(image_path)
+            # Convert to grayscale for better OCR
+            img_gray = img.convert('L')
+            text = pytesseract.image_to_string(img_gray, lang='chi_sim+eng')
+            
+            if text.strip():
+                print("📄 Extracted text:")
+                print("-" * 40)
+                print(text)
+                print("-" * 40)
+                return text
+            else:
+                print("No text detected in image")
+                return ""
+        except Exception as e:
+            print(f"OCR Error: {e}")
+            return ""
+    
+    def find_template(self, template_path, confidence=0.8):
+        """Find a UI element by template matching."""
+        if not os.path.exists(template_path):
+            print(f"❌ Template not found: {template_path}")
+            return None
+        
+        # Take screenshot
+        screenshot = pyautogui.screenshot()
+        screenshot_np = np.array(screenshot)
+        screenshot_cv = cv2.cvtColor(screenshot_np, cv2.COLOR_RGB2BGR)
+        
+        # Load template
+        template = cv2.imread(template_path, cv2.IMREAD_COLOR)
+        if template is None:
+            print(f"❌ Could not load template: {template_path}")
+            return None
+        
+        # Template matching
+        result = cv2.matchTemplate(screenshot_cv, template, cv2.TM_CCOEFF_NORMED)
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+        
+        if max_val >= confidence:
+            h, w = template.shape[:2]
+            center_x = max_loc[0] + w // 2
+            center_y = max_loc[1] + h // 2
+            print(f"✅ Found template at ({center_x}, {center_y}) confidence: {max_val:.2f}")
+            return (center_x, center_y)
+        else:
+            print(f"❌ Template not found (best match: {max_val:.2f})")
+            return None
+    
+    def type_text(self, text, interval=0.05):
+        """Type text at current position using cliclick (more reliable than pyautogui)."""
+        # Remove special characters that cliclick doesn't support
+        clean_text = text.replace('"', "'").strip()
+        
+        # Use cliclick for typing (handles ASCII text)
+        if self._run_cliclick(f't:{clean_text}'):
+            print(f"⌨️ Typed: {text}")
+        else:
+            # Fallback to pyautogui
+            pyautogui.write(text, interval=interval)
+            print(f"⌨️ Typed (fallback): {text}")
+    
+    def press_key(self, key):
+        """Press a key."""
+        key_map = {
+            'return': 'return',
+            'enter': 'return',
+            'tab': 'tab',
+            'space': 'space',
+            'escape': 'esc',
+            'esc': 'esc',
+            'delete': 'delete',
+            'backspace': 'delete',
+        }
+        mapped_key = key_map.get(key.lower(), key.lower())
+        if self._run_cliclick(f'kp:{mapped_key}'):
+            print(f"🔘 Pressed: {key}")
+        else:
+            pyautogui.press(key)
+            print(f"🔘 Pressed (fallback): {key}")
+    
+    def click(self, x, y, clicks=1):
+        """Click at specified coordinates using cliclick."""
+        if self._run_cliclick(f'c:{x},{y}'):
+            print(f"👆 Clicked at ({x}, {y})")
+        else:
+            pyautogui.click(x=x, y=y, clicks=clicks)
+            print(f"👆 Clicked at ({x}, {y}) (fallback)")
+    
+    def move_to(self, x, y):
+        """Move mouse to specified coordinates."""
+        if self._run_cliclick(f'm:{x},{y}'):
+            print(f"🖱️ Moved to ({x}, {y})")
+        else:
+            pyautogui.moveTo(x=x, y=y)
+            print(f"🖱️ Moved to ({x}, {y}) (fallback)")
+    
+    def hotkey(self, *keys):
+        """Press a hotkey combination."""
+        pyautogui.hotkey(*keys)
+        print(f"⚡ Hotkey: {'+'.join(keys)}")
+    
+    def send_message(self, contact_name, message):
+        """
+        Send a message to a contact.
+        Note: This is a basic implementation - full automation requires
+        UI-specific workflows.
+        """
+        # Step 1: Bring WeChat to front
+        self.activate()
+        
+        # Step 2: Click on search/search icon (approximate position)
+        # In a real implementation, you'd use template matching here
+        print(f"📱 Preparing to send message to: {contact_name}")
+        print(f"💬 Message: {message}")
+        
+        # Step 3: Type message (will type at current focus)
+        self.type_text(message)
+        self.press_key('return')
+        
+        print("✅ Message sent (simulated)")
+    
+    def calibrate(self):
+        """Interactive calibration mode to get coordinates."""
+        print("🎯 Calibration Mode")
+        print("Move mouse to desired position and press Enter (Ctrl+C to exit)...")
+        
+        try:
+            while True:
+                input()
+                x, y = pyautogui.position()
+                print(f"   Position: x={x}, y={y}")
+        except KeyboardInterrupt:
+            print("\nCalibration ended")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="WeChat Mac Controller - GUI automation for WeChat"
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    
+    # Screenshot command
+    parser_screenshot = subparsers.add_parser("screenshot", help="Take a screenshot")
+    parser_screenshot.add_argument("-o", "--output", help="Output filename")
+    
+    # OCR command
+    parser_ocr = subparsers.add_parser("ocr", help="Extract text from screenshot")
+    parser_ocr.add_argument("-i", "--input", help="Input image path")
+    
+    # Find command
+    parser_find = subparsers.add_parser("find", help="Find UI element by template")
+    parser_find.add_argument("-t", "--template", required=True, help="Template image path")
+    parser_find.add_argument("-c", "--confidence", type=float, default=0.8, help="Confidence threshold")
+    
+    # Click command
+    parser_click = subparsers.add_parser("click", help="Click at coordinates")
+    parser_click.add_argument("-x", "--x", required=True, type=int)
+    parser_click.add_argument("-y", "--y", required=True, type=int)
+    parser_click.add_argument("-n", "--clicks", type=int, default=1)
+    
+    # Type command
+    parser_type = subparsers.add_parser("type", help="Type text")
+    parser_type.add_argument("-t", "--text", required=True)
+    
+    # Send command
+    parser_send = subparsers.add_parser("send", help="Send message to contact")
+    parser_send.add_argument("-c", "--contact", required=True)
+    parser_send.add_argument("-m", "--message", required=True)
+    
+    # Calibrate command
+    subparsers.add_parser("calibrate", help="Get mouse coordinates interactively")
+    
+    # Activate command
+    subparsers.add_parser("activate", help="Bring WeChat to front")
+    
+    args = parser.parse_args()
+    
+    controller = WeChatController()
+    
+    if args.command == "screenshot":
+        controller.screenshot(args.output)
+    
+    elif args.command == "ocr":
+        controller.ocr(args.input)
+    
+    elif args.command == "find":
+        result = controller.find_template(args.template, args.confidence)
+        if result:
+            print(f"Found at: {result}")
+            sys.exit(0)
+        else:
+            sys.exit(1)
+    
+    elif args.command == "click":
+        controller.click(args.x, args.y, args.clicks)
+    
+    elif args.command == "type":
+        controller.type_text(args.text)
+    
+    elif args.command == "send":
+        controller.send_message(args.contact, args.message)
+    
+    elif args.command == "calibrate":
+        controller.calibrate()
+    
+    elif args.command == "activate":
+        controller.activate()
+    
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
